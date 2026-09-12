@@ -10,6 +10,7 @@ permissions:
   contents: read
   packages: write        # push to GHCR
   id-token: write        # OIDC token for cosign keyless signing
+  Security-events: write
 
 env:
   REGISTRY: ghcr.io
