@@ -1,0 +1,232 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: write        # push to GHCR
+  id-token: write        # OIDC token for cosign keyless signing
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/txn-platform
+
+jobs:
+
+  # ---------------------------------------------------------------------
+  # 1. Lint / test
+  # ---------------------------------------------------------------------
+  lint-test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: app-skeleton
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir -r requirements.txt
+          pip install flake8
+
+      - name: Lint
+        run: flake8 app/ --max-line-length=120
+
+      - name: Syntax / import check
+        run: python -m py_compile app/main.py
+
+  # ---------------------------------------------------------------------
+  # 2. Gitleaks — secret scan (runs on source, independent of the image)
+  # ---------------------------------------------------------------------
+  secret-scan:
+    name: Gitleaks Secret Scan
+    runs-on: ubuntu-latest
+    needs: lint-test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so gitleaks can check past commits too
+
+      - name: Run Gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE not needed for the open-source scan mode
+
+  # ---------------------------------------------------------------------
+  # 3. Build the image (not pushed yet — pushed only after it passes scans)
+  # ---------------------------------------------------------------------
+  build:
+    name: Build Image
+    runs-on: ubuntu-latest
+    needs: [lint-test, secret-scan]
+    outputs:
+      image-tar: image.tar
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image (local, not pushed)
+        working-directory: app-skeleton
+        run: docker build -t txn-platform:ci .
+
+      - name: Save image as artifact for downstream jobs
+        run: docker save txn-platform:ci -o image.tar
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: image-tar
+          path: image.tar
+          retention-days: 1
+
+  # ---------------------------------------------------------------------
+  # 4. Trivy — vulnerability scan. Fails the pipeline on HIGH/CRITICAL.
+  # ---------------------------------------------------------------------
+  vuln-scan:
+    name: Trivy Vulnerability Scan
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Run Trivy
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          input: image.tar
+          format: table
+          severity: HIGH,CRITICAL
+          exit-code: "1"          # <-- this is the actual gate: nonzero exit fails the job
+          ignore-unfixed: true    # don't fail on CVEs with no available fix yet
+
+      - name: Upload Trivy results (SARIF, for the Security tab)
+        if: always()
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          input: image.tar
+          format: sarif
+          output: trivy-results.sarif
+          severity: HIGH,CRITICAL
+          exit-code: "0"          # don't fail twice — this run is just for the report
+
+      - name: Upload SARIF to GitHub Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # ---------------------------------------------------------------------
+  # 5. SBOM — Syft, CycloneDX format
+  # ---------------------------------------------------------------------
+  sbom:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    needs: vuln-scan
+    steps:
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Install Syft
+        uses: anchore/sbom-action/download-syft@v0.17.9
+
+      - name: Generate SBOM (CycloneDX JSON)
+        run: syft txn-platform:ci -o cyclonedx-json=sbom.cdx.json
+
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.cdx.json
+          retention-days: 90
+
+  # ---------------------------------------------------------------------
+  # 6. Push to GHCR (only after every gate above has passed), then
+  #    sign the pushed digest with cosign (keyless, via OIDC).
+  # ---------------------------------------------------------------------
+  push-and-sign:
+    name: Push to GHCR & Sign
+    runs-on: ubuntu-latest
+    needs: [vuln-scan, sbom]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: image-tar
+
+      - name: Load image
+        run: docker load -i image.tar
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tag image for GHCR
+        run: docker tag txn-platform:ci ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Push image
+        id: push
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} | cut -d'@' -f2)
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Pushed digest: $digest"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image by digest (keyless, OIDC — no private key stored anywhere)
+        run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+      - name: Attach SBOM to the signed image
+        uses: actions/download-artifact@v4
+        with:
+          name: sbom
+
+      - name: Attest SBOM to the image (keyless)
+        run: |
+          cosign attest --yes \
+            --predicate sbom.cdx.json \
+            --type cyclonedx \
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}
+
+      - name: Summary
+        run: |
+          echo "### Deployed artifact" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.push.outputs.digest }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "Deploy scripts should reference this **digest**, not the \`:${{ github.sha }}\` tag." >> "$GITHUB_STEP_SUMMARY"
