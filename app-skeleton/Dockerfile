@@ -4,6 +4,9 @@
 
 FROM python:3.12-slim
 
+# Security patch: OS package upgrade to pick up latest CVE fixes
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
+
 # Run as non-root — a basic least-privilege measure at the container level.
 RUN useradd --create-home --uid 1000 appuser
 WORKDIR /home/appuser/app
