@@ -33,14 +33,14 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --no-cache-dir -r requirements.txt
+          pip install --no-cache-dir -r app-skeleton/requirements.txt
           pip install flake8
 
       - name: Lint
-        run: flake8 app/ --max-line-length=120
+        run: flake8 app-skeleton/app/ --max-line-length=120
 
       - name: Syntax / import check
-        run: python -m py_compile app/main.py
+        run: python -m py_compile app-skeleton/app/main.py
 
   # ---------------------------------------------------------------------
   # 2. Gitleaks — secret scan (runs on source, independent of the image)
@@ -73,7 +73,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Build image (local, not pushed)
-        run: docker build -t txn-platform:ci .
+        run: docker build -t txn-platform:ci ./app-skeleton
 
       - name: Save image as artifact for downstream jobs
         run: docker save txn-platform:ci -o image.tar
@@ -289,14 +289,14 @@ jobs:
 
 #       - name: Install dependencies
 #         run: |
-#           pip install --no-cache-dir -r requirements.txt
+#           pip install --no-cache-dir -r app-skeleton/requirements.txt
 #           pip install flake8
 
 #       - name: Lint
-#         run: flake8 app/ --max-line-length=120
+#         run: flake8 app-skeleton/app/ --max-line-length=120
 
 #       - name: Syntax / import check
-#         run: python -m py_compile app/main.py
+#         run: python -m py_compile app-skeleton/app/main.py
 
 #   # ---------------------------------------------------------------------
 #   # 2. Gitleaks — secret scan (runs on source, independent of the image)
@@ -330,7 +330,7 @@ jobs:
 
 #       - name: Build image (local, not pushed)
 #         working-directory: app-skeleton
-#         run: docker build -t txn-platform:ci .
+#         run: docker build -t txn-platform:ci ./app-skeleton
 
 #       - name: Save image as artifact for downstream jobs
 #         run: docker save txn-platform:ci -o image.tar
