@@ -1,141 +1,149 @@
 # Design Note — Secure Multi-Tenant Transaction Platform
 
-## ১. Architecture সিদ্ধান্ত ও কারণ
+## 1. Architecture Decisions and Rationale
 
-**Tenant identity: JWT, raw header না।**
-একটা raw `X-Tenant-ID` header ব্যবহার করলে যে কোনো client নিজেই সেই header
-বসিয়ে অন্য tenant-এর পরিচয় claim করতে পারতো — এটা কোনো trust boundary না,
-শুধু একটা unverified assertion। এর বদলে tenant identity একটা **signed JWT**-এ
-রাখা হয়েছে, যেখানে `tenant_id` claim থাকে এবং app শুধু signature verify করার
-পরেই সেই claim বিশ্বাস করে (`jwt.decode(token, JWT_SECRET, ...)`)। Production-এ
-এই token issue করবে একটা SSE edge / identity provider, client-এর real
-authentication (mTLS বা OAuth client-credentials) verify করার পরে — এই repo-তে
-`tests/generate_token.py` শুধু demo/টেস্টের জন্য নিজেরাই token বানায়, এটা একটা
-**known shortcut**।
+**Tenant identity: JWT, not a raw header.**
+A raw `X-Tenant-ID` header would let any client simply set that header and
+claim to be a different tenant — that's not a trust boundary, just an
+unverified assertion. Instead, tenant identity lives in a **signed JWT**
+carrying a `tenant_id` claim, and the app only trusts that claim after
+verifying the signature (`jwt.decode(token, JWT_SECRET, ...)`). In
+production, this token would be issued by an SSE edge / identity provider
+after verifying the client's real authentication (mTLS or OAuth
+client-credentials) — in this repo, `tests/generate_token.py` mints
+tokens itself purely for testing, which is a **known shortcut**.
 
-**Network layering: দুইটা layer (edge-net, app-net), তিনটা না।**
-দুইটা layer যথেষ্ট মনে হয়েছে কারণ trust boundary আসলে একটাই জায়গায় দরকার:
-internet-facing traffic বনাম internal service-to-service traffic। Traefik
-একমাত্র সেতু — দুই network-এই আছে, বাকি সব backend service (app, Prometheus)
-শুধু `app-net`-এ, কোনো published port ছাড়া। এটা diagram-এই না, actual Swarm
-config-এই enforce করা (`verify_network_boundary.sh` দিয়ে প্রমাণিত: app port
-8080 সরাসরি host থেকে reachable না)।
+**Network layering: two layers (edge-net, app-net), not three.**
+Two layers felt sufficient because there's really only one boundary that
+matters: internet-facing traffic vs. internal service-to-service traffic.
+Traefik is the sole bridge — every other backend service (app,
+Prometheus) sits on `app-net` only, with no published ports. This is
+enforced in the actual Swarm config, not just drawn in a diagram
+(`verify_network_boundary.sh` proves the app's port 8080 is not directly
+reachable from the host).
 
-**Tool নির্বাচন:** Traefik (native Docker Swarm provider support, label-based
-config, built-in rate-limit middleware), GitHub Actions (repo-র সাথে already
-integrated), Trivy/Gitleaks/Syft/cosign (industry-standard, ভালো Action/CLI
-সাপোর্ট, keyless signing দিয়ে private key management এড়ানো যায়), Prometheus +
-Grafana (de facto standard, label-based per-tenant metric slicing সহজ)।
+**Tool choices:** Traefik (native Docker Swarm provider support,
+label-based config, built-in rate-limit middleware), GitHub Actions
+(already integrated with the repo), Trivy/Gitleaks/Syft/cosign
+(industry-standard, good Action/CLI support, keyless signing avoids
+private-key management), Prometheus + Grafana (de facto standard,
+label-based per-tenant metric slicing is easy).
 
-## ২. Supply-chain Approach
+## 2. Supply-Chain Approach
 
-প্রতিটা push হওয়া image এই gate-গুলো পার হতে হয়:
-`lint/test → secret-scan (Gitleaks) → build → vuln-scan (Trivy, HIGH/CRITICAL
-এ exit-code 1) → SBOM (Syft, CycloneDX) → push to GHCR by digest → cosign sign
-(keyless, OIDC) → cosign attest (SBOM attached)`।
+Every pushed image must pass these gates:
+`lint/test → secret-scan (Gitleaks) → build → vuln-scan (Trivy, exit-code
+1 on HIGH/CRITICAL) → SBOM (Syft, CycloneDX) → push to GHCR by digest →
+cosign sign (keyless, OIDC) → cosign attest (SBOM attached)`.
 
-**গুরুত্বপূর্ণ ডিজাইন সিদ্ধান্ত:**
-- Image push হয় শুধু **digest** দিয়ে, mutable tag দিয়ে না — deploy script
-  digest reference করবে, যাতে "same tag, different content" আক্রমণ সম্ভব না হয়।
-- Cosign **keyless** (OIDC-ভিত্তিক) — কোনো private signing key repo বা secret-এ
-  স্টোর করতে হয় না, ফলে key-leak-এর risk-ই নেই।
-- Vulnerability gate hard block: HIGH/CRITICAL পেলে pipeline fail করে, image
-  push/sign জবই চলে না (`needs: [vuln-scan, sbom]`)।
-- Trivy CLI সরাসরি Docker image হিসেবে চালানো হয়েছে (`aquasec/trivy` container),
-  official GitHub Action না ব্যবহার করে — কারণ সেই Action-এর binary-download
-  installer একটা পরিচিত flaky upstream issue-এর শিকার হচ্ছিল; Docker Hub pull
-  এই pipeline-এই আগে প্রমাণিত reachable, তাই এটা বেশি নির্ভরযোগ্য পথ।
+**Key design decisions:**
+- Images are pushed by **digest**, not by mutable tag — the deploy script
+  references the digest, preventing a "same tag, different content"
+  attack.
+- Cosign signing is **keyless** (OIDC-based) — no private signing key is
+  ever stored in the repo or in secrets, so there's no key to leak.
+- The vulnerability gate is a hard block: a HIGH/CRITICAL finding fails
+  the pipeline and the push/sign job never runs
+  (`needs: [vuln-scan, sbom]`).
+- Trivy is run directly as a Docker container (`aquasec/trivy`) rather
+  than through the official GitHub Action, because that Action's
+  binary-download installer had a known flaky upstream issue; Docker Hub
+  pulls were already proven reachable earlier in the same pipeline, so
+  this path is more reliable.
 
-## ৩. Secrets / Identity Model
+## 3. Secrets / Identity Model
 
-- **JWT secret**: Docker Swarm secret (`jwt_secret`) হিসেবে
-  `/run/secrets/jwt_secret`-এ mount, app `JWT_SECRET_FILE` থেকে পড়ে। Plaintext
-  env var (`JWT_SECRET`) শুধু local dev fallback।
-- **প্রকৃত bug ধরা পড়েছিল এবং ঠিক করা হয়েছে**: প্রথম ভার্সনে
-  `docker-stack.yml`-এ `JWT_SECRET_FILE` সেট থাকলেও `app/main.py` আসলে সেটা
-  পড়ত না — শুধু `JWT_SECRET` env var (আর না থাকলে hardcoded
-  `"devsecret123"`) ব্যবহার করত। ফলে Swarm secret mount হলেও app silently
-  hardcoded default-এ fallback করছিল। এটা manually verify করে ধরা হয় এবং
-  `_load_jwt_secret()` ফাংশন লিখে ঠিক করা হয়েছে (priority:
-  `JWT_SECRET_FILE` > `JWT_SECRET` > **fail loudly at startup**, silent
-  insecure default না)। (এই ঘটনাটাই AI usage disclosure-এর জন্য concrete
-  উদাহরণ, দেখো `docs/AI_USAGE.md`।)
-- **Grafana admin password**: একইভাবে Swarm secret
-  (`grafana_admin_password`) হিসেবে mount।
-- **CI/CD secrets**: GitHub Actions built-in `GITHUB_TOKEN` ব্যবহার করা
-  হয়েছে GHCR push-এর জন্য (repo-scoped, auto-rotated), আলাদা করে কোনো
-  long-lived PAT বা hardcoded credential repo-তে নেই। Cosign signing OIDC
-  (`id-token: write` permission) দিয়ে, কোনো key secret হিসেবে স্টোর করা
-  হয়নি।
-- **Least privilege**: workflow-এর `permissions:` ব্লকে শুধু প্রয়োজনীয়
-  scope দেওয়া (`contents: read`, `packages: write`, `id-token: write`)।
+- **JWT secret**: mounted as a Docker Swarm secret (`jwt_secret`) at
+  `/run/secrets/jwt_secret`; the app reads it via `JWT_SECRET_FILE`. A
+  plaintext env var (`JWT_SECRET`) is only a local-dev fallback.
+- **A real bug was found and fixed here**: in an earlier version,
+  `docker-stack.yml` correctly set `JWT_SECRET_FILE`, but `app/main.py`
+  never actually read it — it only used the `JWT_SECRET` env var (and
+  fell back to a hardcoded `"devsecret123"` if that was missing). So even
+  with the Swarm secret properly mounted, the app was silently falling
+  back to a hardcoded, insecure default. This was caught through manual
+  review and fixed by writing `_load_jwt_secret()` (priority:
+  `JWT_SECRET_FILE` > `JWT_SECRET` > **fail loudly at startup**, instead
+  of a silent insecure default). (This is also the concrete example used
+  in the AI usage disclosure — see `docs/AI_USAGE.md`.)
+- **Grafana admin password**: similarly mounted as a Swarm secret
+  (`grafana_admin_password`).
+- **CI/CD secrets**: the built-in `GITHUB_TOKEN` (repo-scoped,
+  auto-rotated) is used for GHCR push, so no long-lived PAT or hardcoded
+  credential lives in the repo. Cosign signing uses OIDC
+  (`id-token: write` permission) — no signing key is stored as a secret
+  anywhere.
+- **Least privilege**: the workflow's `permissions:` block grants only
+  the scopes actually needed (`contents: read`, `packages: write`,
+  `id-token: write`).
 
-## ৪. Observability
+## 4. Observability
 
-- **Structured logs**: প্রতিটা log line-এ `tenant_id`, `request_id`,
-  এবং (health/version endpoint-এ) `version` — JSON-ish format, তাই সহজে
-  grep/filter করা যায় বা পরে Loki-তে ingest করা যায়।
-- **Metrics**: দুইটা Prometheus metric, দুটোই `tenant_id` label সহ —
-  `http_request_duration_seconds` (Histogram, latency percentile হিসাবের
-  জন্য) এবং `http_requests_total` (Counter, error rate হিসাবের জন্য,
-  `http_status` label সহ)। Auth-fail হওয়া request-গুলো
-  `tenant_id="unauthenticated"` লেবেল পায় — এটা নিজেই Scenario 3-এর জন্য
-  একটা signal।
-- **Dashboard**: তিনটা panel — p95 Latency per Tenant, Per-tenant Error
-  Rate, Request Rate per Tenant — একজন অপারেটর এক নজরে বুঝতে পারে কোন
-  tenant-এ সমস্যা হচ্ছে।
-- **Alert**: `HighErrorRatePerTenant` rule, per-tenant 5xx/total ratio
-  (`or ... * 0` fallback দিয়ে zero-error tenant-এর জন্যও ডেটা নিশ্চিত করা
-  হয়েছে, "no data" এড়াতে) 10%-এর বেশি হলে ১ মিনিট (pending period) পর
-  Firing হয়।
+- **Structured logs**: every log line carries `tenant_id`, `request_id`,
+  and (on health/version endpoints) `version` — JSON-ish format, easy to
+  grep/filter or ingest into Loki later.
+- **Metrics**: two Prometheus metrics, both labeled by `tenant_id` —
+  `http_request_duration_seconds` (Histogram, for latency percentiles)
+  and `http_requests_total` (Counter, for error rate, labeled by
+  `http_status`). Requests that fail auth get `tenant_id="unauthenticated"`
+  — itself a signal for Scenario 3.
+- **Dashboards**: three separate Grafana dashboards — p95 Latency per
+  Tenant, Per-tenant Error Rate, Request Rate per Tenant — so an operator
+  can see at a glance which tenant is affected.
+- **Alert**: `HighErrorRatePerTenant` fires when a tenant's 5xx/total
+  ratio (using an `or ... * 0` fallback so tenants with zero errors still
+  report a value instead of "no data") exceeds 10% for 1 minute (pending
+  period).
 
-## ৫. Rollback Strategy
+## 5. Rollback Strategy
 
-`docker-stack.yml`-এ `update_config: failure_action: rollback,
-monitor: 15s, max_failure_ratio: 0` — নতুন deployment-এর পর ১৫ সেকেন্ড
-Swarm নিজে healthcheck monitor করে; একটাও task fail করলে **automatic**
-rollback হয়, কোনো human intervention ছাড়াই। `demo_bad_deploy.sh` দিয়ে এটা
-verify করা হয়েছে — `FAIL_HEALTH=true` version deploy করে, Swarm detect
-করে auto-rollback করে, `/health` + smoke test দিয়ে recovery confirm করা
-হয়েছে। Manual override: `docker service rollback axiler_app`।
+`docker-stack.yml` sets `update_config: failure_action: rollback,
+monitor: 15s, max_failure_ratio: 0` — after a new deployment, Swarm
+monitors healthchecks for 15 seconds; if even one task fails, it
+**automatically** rolls back, with no human intervention. Verified via
+`demo_bad_deploy.sh` — deploying a `FAIL_HEALTH=true` version, Swarm
+detected it and auto-rolled back, confirmed by `/health` + the smoke
+test. Manual override: `docker service rollback axiler_app`.
 
-## ৬. Restricted-connectivity Delivery Design
+## 6. Restricted-Connectivity Delivery Design
 
-Registry হিসেবে GHCR ব্যবহার করা হয়েছে, কিন্তু local demo/single-node
-Swarm-এ multi-node distribution দরকার নেই বলে placement constraint
-(`node.role == manager`) দিয়ে single node-এ pin করা আছে। একটা local
-registry (`registry:2`, port 5000) ও চালু রাখা হয়েছে — কোনো external
-network access না থাকা restricted পরিবেশে (air-gapped বা limited
-connectivity), image local registry-তে push/pull করে চালানো যায়, যেটা
-GHCR-এর মতো external dependency ছাড়াই deploy সম্ভব করে। Production
-multi-node হলে GHCR-থেকে pull করার জন্য প্রতিটা node-এ registry
-credential/imagePullSecret দরকার হবে, আর placement constraint সরিয়ে ফেলতে
-হবে।
+GHCR is used as the registry, but since this is a single-node local demo,
+the `app` service is pinned to the manager node
+(`node.role == manager`) rather than distributed via a registry. A local
+registry (`registry:2`, port 5000) is also running — in a restricted or
+air-gapped environment with no external network access, images could be
+pushed/pulled from this local registry instead, allowing deployment
+without any dependency on GHCR. In a real multi-node production
+deployment, each node would need registry credentials / an
+imagePullSecret to pull from GHCR, and the placement constraint would be
+removed.
 
-## ৭. Known Gaps ও প্রোডাকশনের জন্য প্রথম Improvement
+## 7. Known Gaps and First Improvements Before Production
 
-1. **Edge-level JWT validation নেই** — Traefik শুধু rate-limit করে
-   (5 req/s avg, burst 10); JWT validation পুরোপুরি app-layer-এ। এটা একটা
-   ইচ্ছাকৃত সিদ্ধান্ত (auth logic এক জায়গায় কেন্দ্রীভূত রাখা, duplicate
-   validation logic এড়ানো), কিন্তু defense-in-depth-এর দিক থেকে
-   production-এ edge-এও একটা lightweight pre-check (যেমন ForwardAuth
-   middleware) যোগ করা প্রথম উন্নতি হতে পারে — invalid token request app
-   পর্যন্ত পৌঁছানোর আগেই বাদ দেওয়া যাবে, resource সাশ্রয় হবে।
-2. **Grafana সরাসরি port publish করছে** (`edge-net`-এ, port 3000) —
-   TLS বা auth hardening ছাড়া। Production-এ এটা Traefik-এর পেছনে নিয়ে
-   গিয়ে TLS + access control যোগ করা উচিত।
-3. **TLS/HTTPS বাদ দেওয়া** — সরলতার জন্য পুরো demo HTTP-তে। Production-এ
-   Traefik-এ Let's Encrypt বা internal CA দিয়ে TLS বাধ্যতামূলক করতে হবে।
-4. **Single-node Swarm** — multi-node হলে overlay network encryption
-   (`--opt encrypted`) ও manager quorum নিয়ে আলাদাভাবে ভাবতে হবে।
-5. **Swarm secrets immutable** — secret rotate করতে নতুন নামে secret
-   বানিয়ে service update করতে হয়। Production-এ HashiCorp Vault বা cloud
-   secret manager দিয়ে এটা আরও gracefully handle করা উচিত।
-6. **Traefik dashboard (port 8081) insecure mode-এ খোলা** — শুধু local
-   demo debugging-এর জন্য; production-এ এটা বন্ধ বা আলাদা secured
-   network-এ রাখতে হবে।
+1. **No edge-level JWT validation** — Traefik only rate-limits (5 req/s
+   average, burst 10); JWT validation is entirely at the app layer. This
+   is deliberate (keeping auth logic centralized, avoiding duplicated
+   validation logic), but from a defense-in-depth perspective, adding a
+   lightweight edge pre-check (e.g. a ForwardAuth middleware) in
+   production would be a good first improvement — invalid tokens could
+   be rejected before ever reaching the app, saving resources.
+2. **Grafana publishes a port directly** (on `edge-net`, port 3000) with
+   no TLS or auth hardening beyond Grafana's own login. In production this
+   should sit behind Traefik with TLS and access control.
+3. **TLS/HTTPS omitted** — the whole demo runs over plain HTTP for
+   simplicity. Production should enforce TLS via Traefik with Let's
+   Encrypt or an internal CA.
+4. **Single-node Swarm** — a multi-node setup would need overlay network
+   encryption (`--opt encrypted`) and manager quorum considerations.
+5. **Swarm secrets are immutable** — rotating a secret requires creating
+   one under a new name and updating the service. Production should
+   handle this more gracefully with HashiCorp Vault or a cloud secret
+   manager.
+6. **Traefik dashboard (port 8081) is exposed in insecure mode** — only
+   for local demo debugging; in production this should be disabled or
+   placed on a separate secured network.
 
-**যদি একটাই জিনিস প্রথমে ঠিক করতে হতো (production যাওয়ার আগে):** TLS
-চালু করা এবং Grafana-কে edge-এর পেছনে নিয়ে যাওয়া — কারণ বর্তমানে এই দুইটাই
-সবচেয়ে সরাসরি externally-visible gap, বাকিগুলো internal architecture
-নিয়ে যা zero-day exposure না।
+**If only one thing could be fixed first before going to production:**
+enabling TLS and moving Grafana behind the edge — these are the two most
+directly externally-visible gaps right now; the rest are internal
+architecture considerations, not zero-day exposure.

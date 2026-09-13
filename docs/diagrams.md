@@ -1,9 +1,10 @@
 # Diagrams
 
-এই দুইটা diagram GitHub-এ সরাসরি render হবে (Mermaid syntax, কোনো এক্সটার্নাল
-টুল লাগে না)। Excalidraw দিয়ে হাতে-আঁকা draft থেকে এইগুলো polish করা হয়েছে।
+Both diagrams render natively on GitHub (Mermaid syntax, no external tool
+needed). These are the polished versions of a hand-drawn Excalidraw draft
+made earlier.
 
-## ১. Build / Release Flow (Supply-chain, CI/CD)
+## 1. Build / Release Flow (Supply Chain, CI/CD)
 
 ```mermaid
 flowchart TD
@@ -22,11 +23,11 @@ flowchart TD
     style J fill:#1f3d2e,stroke:#4dff88,color:#fff
 ```
 
-**মূল কথা:** কোনো image production-এ যাওয়ার আগে বাধ্যতামূলকভাবে scan +
-SBOM + sign পার হতে হয় (gate)। Signing হয় **digest**-এর উপর, mutable tag-এর
-উপর না — deploy script-ও digest রেফারেন্স করে।
+**Key point:** no image reaches production without first passing
+scan + SBOM + sign gates. Signing is done on the **digest**, not on a
+mutable tag — the deploy script references the digest as well.
 
-## ২. Runtime Request Flow (Trust boundary চিহ্নিত)
+## 2. Runtime Request Flow (Trust Boundaries Marked)
 
 ```mermaid
 flowchart TD
@@ -34,11 +35,11 @@ flowchart TD
         C1[Client]
     end
 
-    subgraph edgenet["edge-net (overlay) — শুধু এখানেই published port"]
+    subgraph edgenet["edge-net (overlay) — only network with a published port"]
         T[Traefik<br/>:80 published<br/>rate-limit: 5 req/s avg, burst 10]
     end
 
-    subgraph appnet["app-net (overlay) — কোনো published port নেই,<br/>বাইরে থেকে unreachable"]
+    subgraph appnet["app-net (overlay) — no published ports,<br/>unreachable from outside"]
         A1[app replica 1]
         A2[app replica 2]
         P[Prometheus<br/>scrapes app:8080/metrics]
@@ -61,16 +62,16 @@ flowchart TD
     style internet fill:#1a1a1a,stroke:#888
 ```
 
-**Trust boundary যা এখানে মার্ক করা:**
-1. **Internet ↔ edge-net**: একমাত্র crossing point। শুধু Traefik-এর port
-   (80, এবং demo-only 8081) publish করা।
-2. **edge-net ↔ app-net**: Traefik দুই network-এই আছে বলে সেতুর কাজ করে;
-   `app` service-টা **শুধু** `app-net`-এ, কোনো published port নেই — তাই
-   client সরাসরি `app`-এ পৌঁছাতে পারে না, বাধ্যতামূলক Traefik দিয়ে যেতে হয়
-   (এটা `verify_network_boundary.sh` দিয়ে প্রমাণিত)।
-3. **App-এর ভেতরে**: JWT signature verify হওয়ার পরেই `tenant_id`
-   trust করা হয় — কোনো header/query param থেকে সরাসরি না। প্রতিটা DB
-   lookup সেই verified `tenant_id` দিয়ে scoped।
-4. **Known shortcut**: Grafana `edge-net`-এও আছে এবং সরাসরি port 3000
-   publish করছে — production-এ এটাও Traefik-এর পেছনে TLS + auth সহ
-   যাওয়া উচিত (design note-এ বিস্তারিত)।
+**Trust boundaries marked here:**
+1. **Internet ↔ edge-net**: the only crossing point. Only Traefik's ports
+   (80, and demo-only 8081) are published.
+2. **edge-net ↔ app-net**: Traefik bridges the two networks; the `app`
+   service is on `app-net` **only**, with no published port — so a client
+   cannot reach `app` directly and must go through Traefik (proven by
+   `verify_network_boundary.sh`).
+3. **Inside the app**: `tenant_id` is trusted only after JWT signature
+   verification — never taken directly from a header or query parameter.
+   Every DB lookup is scoped by that verified `tenant_id`.
+4. **Known shortcut**: Grafana is also on `edge-net` and publishes port
+   3000 directly — in production this should also go behind Traefik with
+   TLS and auth (see design note for details).
