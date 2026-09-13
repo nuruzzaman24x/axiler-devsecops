@@ -1,0 +1,62 @@
+groups:
+  - name: txn-platform-alerts
+    rules:
+      # Actionable alert #1 (required by the assignment): elevated error
+      # rate. Fires if more than 5% of requests across all tenants return
+      # a 5xx status over a 2-minute window, sustained for 1 minute.
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(http_requests_total{http_status=~"5.."}[2m]))
+            /
+            sum(rate(http_requests_total[2m]))
+          ) > 0.05
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Elevated error rate on txn-platform"
+          description: >-
+            More than 5% of requests have returned 5xx in the last 2
+            minutes. Check `docker service ps axiler_app` and recent
+            deploys - this is the expected signal for Scenario 2
+            (bad deployment).
+
+      # Actionable alert #2: a burst of auth failures, which is the
+      # operational signal for Scenario 3 (suspicious/unauthorized
+      # traffic). Anything hitting the app with an invalid/missing
+      # token is counted as tenant_id="unauthenticated".
+      - alert: SuspiciousUnauthenticatedTraffic
+        expr: |
+          sum(rate(http_requests_total{tenant_id="unauthenticated"}[1m])) > 5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Burst of unauthenticated/rejected requests"
+          description: >-
+            More than 5 req/s over the last minute failed authentication
+            (missing or invalid token). Could indicate a misconfigured
+            client, a credential-scanning attempt, or an abusive burst.
+            Check edge (Traefik) access logs and app auth_failed log lines.
+
+      # Actionable alert #3: edge-level rate limiting is actively
+      # rejecting requests (HTTP 429 from Traefik's rate-limit
+      # middleware, see docker-stack.yml). A sustained burst of 429s
+      # means the abuse control at the edge is actually doing something -
+      # this ties the edge control to a concrete signal, not just a
+      # config that exists on paper.
+      - alert: EdgeRateLimitingActive
+        expr: |
+          sum(rate(traefik_entrypoint_requests_total{code="429"}[1m])) > 1
+        for: 30s
+        labels:
+          severity: info
+        annotations:
+          summary: "Edge rate limiting is rejecting requests"
+          description: >-
+            Traefik's rate-limit middleware has been rejecting requests
+            (HTTP 429 at the edge) for at least 30s. Confirm this matches
+            expected traffic (e.g. a deliberate burst test) or investigate
+            as potential abuse. Requires Traefik's own Prometheus metrics
+            to be scraped (job "traefik-edge" in prometheus.yml).

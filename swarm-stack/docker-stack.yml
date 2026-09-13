@@ -20,12 +20,12 @@ version: "3.8"
 #
 # Observability addition (Step 8):
 #   - prometheus lives on app-net only, so it can scrape app:8080/metrics
-#     directly over the internal overlay network — no published port
-#     needed for prometheus itself.
+#     and edge:8080/metrics directly over the internal overlay network -
+#     no published port needed for prometheus itself.
 #   - grafana needs a way for a human to view dashboards, so it publishes
 #     port 3000 directly to the host. This is a deliberate, documented
 #     shortcut for the local/demo environment (see README "known
-#     shortcuts") — in production this should sit behind the edge
+#     shortcuts") - in production this should sit behind the edge
 #     (Traefik) with auth, not a raw published port.
 # ---------------------------------------------------------------------------
 
@@ -42,6 +42,9 @@ services:
       - "--api.dashboard=true"
       - "--api.insecure=true"              # LOCAL DEMO ONLY: exposes the API/dashboard
                                             # without auth so you can debug via :8081/api/*
+      - "--metrics.prometheus=true"        # Exposes Traefik's own metrics (incl. rate-limit
+                                            # 429s) at :8080/metrics, scraped by prometheus
+                                            # below over the internal app-net network.
       - "--accesslog=true"                 # request-level log for every hit at the edge
       - "--accesslog.fields.headers.defaultmode=drop"
       - "--accesslog.fields.headers.names.X-Request-Id=keep"
@@ -49,12 +52,12 @@ services:
     ports:
       - target: 80
         published: 80
-      - target: 8080          # Traefik dashboard - LOCAL DEMO ONLY.
+      - target: 8080          # Traefik dashboard/API/metrics - LOCAL DEMO ONLY.
         published: 8081       # In production this must not be publicly exposed;
                                # see design note "known gaps".
     networks:
       - edge-net
-      - app-net
+      - app-net              # needed so prometheus (on app-net) can reach edge:8080/metrics
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     deploy:
@@ -97,7 +100,7 @@ services:
         # --- Rate limiting middleware (Step 4) ---
         # Average: 5 requests/sec sustained, Burst: up to 10 in a spike.
         # Requests beyond this get a 429 from Traefik before ever reaching
-        # the app. JWT validation itself stays in the app (see README) —
+        # the app. JWT validation itself stays in the app (see README) -
         # this is just edge-level abuse protection, not auth.
         - "traefik.http.middlewares.app-ratelimit.ratelimit.average=5"
         - "traefik.http.middlewares.app-ratelimit.ratelimit.burst=10"
@@ -127,18 +130,23 @@ services:
           memory: 64M
 
   # ---------------------------------------------------------------------
-  # Prometheus — scrapes app:8080/metrics over the internal app-net
-  # overlay network. No published port needed; it never needs to be
-  # reached from outside the swarm. Grafana (below) queries it
-  # internally over the same network.
+  # Prometheus - scrapes app:8080/metrics AND edge:8080/metrics over the
+  # internal app-net overlay network. No published port strictly needed;
+  # port 9090 is published for local demo convenience so you can open the
+  # UI directly (see README "known shortcuts").
   # ---------------------------------------------------------------------
   prometheus:
     image: prom/prometheus:v2.55.1
     configs:
       - source: prometheus_config
         target: /etc/prometheus/prometheus.yml
+      - source: alert_rules_config
+        target: /etc/prometheus/alert_rules.yml
     networks:
       - app-net
+    ports:
+      - target: 9090
+        published: 9090   # LOCAL DEMO ONLY - see design note "known gaps".
     deploy:
       placement:
         constraints: [node.role == manager]
@@ -155,7 +163,7 @@ services:
           memory: 64M
 
   # ---------------------------------------------------------------------
-  # Grafana — dashboard UI. Publishes port 3000 directly to the host so
+  # Grafana - dashboard UI. Publishes port 3000 directly to the host so
   # a human can view it. KNOWN SHORTCUT: for this local demo it's a raw
   # published port with no auth hardening beyond Grafana's own login;
   # in production this should go through the edge (Traefik) with TLS
@@ -201,8 +209,8 @@ networks:
     driver: overlay
     # No "attachable: true" and no published ports for "app" or
     # "prometheus" on this network -> those two are not reachable from
-    # outside the swarm cluster. ("grafana" is also on edge-net so it
-    # can be reached directly, per the known shortcut above.)
+    # outside the swarm cluster. ("edge" and "grafana" are also on
+    # edge-net so they can be reached directly, per the design above.)
 
 volumes:
   grafana-data:
@@ -212,24 +220,32 @@ configs:
   prometheus_config:
     file: ./prometheus.yml
     # See prometheus.yml in this same directory. Docker configs (unlike
-    # secrets) are plaintext, which is fine here — a scrape config isn't
-    # sensitive. If you edit prometheus.yml, you must re-create this
-    # config object (configs are immutable, same as secrets) — see
-    # rotate_secret.sh-style approach, or just:
-    #   docker config rm prometheus_config
-    #   docker config create prometheus_config ./prometheus.yml
-    # then redeploy.
+    # secrets) are plaintext, which is fine here - a scrape config isn't
+    # sensitive.
+  alert_rules_config:
+    file: ./alert_rules.yml
+    # See alert_rules.yml in this same directory.
+    #
+    # IMPORTANT: Docker configs are immutable, same as secrets. If you
+    # edit prometheus.yml OR alert_rules.yml after the first deploy, the
+    # config object itself will NOT auto-update - Docker Swarm compares
+    # file content and will error on `docker stack deploy` if you just
+    # edit and redeploy with the same config name referencing changed
+    # content in some Docker versions, or silently keep the old version
+    # in others. Safest path if you edit either file:
+    #   docker service update --config-rm alert_rules_config axiler_prometheus
+    #   docker config rm alert_rules_config
+    #   docker stack deploy -c docker-stack.yml axiler
+    # (repeat similarly for prometheus_config if that file changed)
 
 secrets:
   jwt_secret:
     external: true
     # Created ahead of time with:
     #   printf "devsecret123" | docker secret create jwt_secret -
-    # See deploy.sh.
+    # See deploy.sh (creates this automatically if missing).
   grafana_admin_password:
     external: true
-    # Created ahead of time with, e.g.:
+    # Created ahead of time with:
     #   printf "changeme123" | docker secret create grafana_admin_password -
-    # (pick your own value — see deploy.sh, which will be updated to
-    # create this alongside jwt_secret if it doesn't already exist)
-
+    # See deploy.sh (creates this automatically if missing).
