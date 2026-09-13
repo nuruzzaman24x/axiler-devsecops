@@ -28,7 +28,7 @@ groups:
       # token is counted as tenant_id="unauthenticated".
       - alert: SuspiciousUnauthenticatedTraffic
         expr: |
-          sum(rate(http_requests_total{tenant_id="unauthenticated"}[1m])) > 5
+          sum(rate(http_requests_total{tenant_id="unauthenticated"}[1m])) > 3
         for: 30s
         labels:
           severity: warning

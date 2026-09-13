@@ -73,6 +73,7 @@ services:
     environment:
       - SERVICE_VERSION=1.0.0
       - JWT_SECRET_FILE=/run/secrets/jwt_secret
+      # - FAIL_HEALTH=true
       - FAIL_HEALTH=false
     secrets:
       - jwt_secret
@@ -102,6 +103,8 @@ services:
         # Requests beyond this get a 429 from Traefik before ever reaching
         # the app. JWT validation itself stays in the app (see README) -
         # this is just edge-level abuse protection, not auth.
+        # - "traefik.http.middlewares.app-ratelimit.ratelimit.average=50"
+        # - "traefik.http.middlewares.app-ratelimit.ratelimit.burst=100"
         - "traefik.http.middlewares.app-ratelimit.ratelimit.average=5"
         - "traefik.http.middlewares.app-ratelimit.ratelimit.burst=10"
         - "traefik.http.routers.app.middlewares=app-ratelimit"
@@ -234,6 +237,7 @@ configs:
     # secrets) are plaintext, which is fine here - a scrape config isn't
     # sensitive.
   alert_rules_config:
+    name: alert_rules_config_${TIMESTAMP:-v1}
     file: ./alert_rules.yml
     # See alert_rules.yml in this same directory.
   grafana_datasource_config:

@@ -21,6 +21,47 @@ Each sub-folder has its own detailed README (setup commands, script
 explanations). This file is a project overview and a scenario-reproduction
 guide.
 
+## Prerequisites
+
+This demo assumes the following are already installed and running on the
+host:
+
+- **Docker Engine 20.10+** with Swarm mode support (`docker swarm init`
+  must succeed). This uses native `docker stack deploy` — the
+  `docker compose` plugin is **not** required.
+- `bash`, `curl`, `git`
+
+If Docker isn't installed, see
+[docs.docker.com/engine/install](https://docs.docker.com/engine/install/).
+Verify before running `./deploy.sh`:
+```bash
+docker --version
+docker info   # confirms the daemon is actually running and you have permission to use it
+```
+
+No other manual setup is needed — `deploy.sh` builds the image, creates
+Swarm secrets if they don't already exist, and deploys the full stack in
+one step.
+
+## Prerequisites
+
+This demo assumes the following are already available on the host — no
+provisioning/bootstrap automation is included, since that was out of
+scope for the time box:
+
+- **Docker Engine 20.10+** with Swarm mode support (native `docker
+  stack deploy` is used — the `docker compose` plugin is **not**
+  required)
+- `bash`, `curl`, `git`
+- Ports `80`, `3000`, `8081`, `9090` free on the host
+
+Verify before running `./deploy.sh`:
+```bash
+docker --version
+docker info    # confirms the daemon is running and you have permission
+```
+If Docker isn't installed: https://docs.docker.com/engine/install/
+
 ## Quick Setup (Local)
 
 ```bash
@@ -71,6 +112,57 @@ For detailed rationale and known gaps, see
 
 Build/release flow and runtime request flow — see
 [`docs/diagrams.md`](./docs/diagrams.md).
+
+## API Usage
+
+Three endpoints, all served through the edge on port `80`:
+
+| Method | Path | Auth required | Purpose |
+|---|---|---|---|
+| GET | `/health` | No | Liveness/readiness check |
+| GET | `/search?account=<id>` | Yes (Bearer JWT) | Look up an account owned by the caller's tenant |
+| POST | `/transfer` | Yes (Bearer JWT) | Transfer between two accounts, both must belong to the caller's tenant |
+
+**Tenant access method**: identity comes from a signed JWT with a
+`tenant_id` claim, sent as `Authorization: Bearer <token>`. Two demo
+tenants exist out of the box: `alpha` and `beta` (see
+`app-skeleton/app/main.py`'s `FAKE_DB`). Mint a token for either with:
+```bash
+cd app-skeleton
+export JWT_SECRET=devsecret123
+python tests/generate_token.py alpha   # or: beta
+```
+
+**Example calls:**
+```bash
+TOKEN=$(python tests/generate_token.py alpha)
+
+curl http://localhost:80/health
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:80/search?account=ACC-1001"
+
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"from_account":"ACC-1001","to_account":"ACC-1002","amount":100}' \
+  http://localhost:80/transfer
+```
+
+## Traffic Generation
+
+Two helper scripts under `swarm-stack/` generate load for testing
+observability and edge controls:
+```bash
+cd swarm-stack
+./demo_ratelimit.sh      # bursts requests to trigger Traefik's 429 rate-limit
+./demo_bad_deploy.sh     # deploys a FAIL_HEALTH=true version (Scenario 2)
+```
+For a full functional pass over every endpoint and the isolation logic:
+```bash
+cd app-skeleton
+export BASE_URL=http://localhost:80
+export JWT_SECRET=devsecret123
+bash tests/smoke_test.sh
+```
 
 ## Reproducing the Three Required Scenarios
 

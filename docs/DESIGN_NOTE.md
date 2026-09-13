@@ -145,10 +145,55 @@ the `app` service is pinned to the manager node
 registry (`registry:2`, port 5000) is also running — in a restricted or
 air-gapped environment with no external network access, images could be
 pushed/pulled from this local registry instead, allowing deployment
-without any dependency on GHCR. In a real multi-node production
-deployment, each node would need registry credentials / an
-imagePullSecret to pull from GHCR, and the placement constraint would be
-removed.
+without any dependency on GHCR.
+
+**How a customer verifies a package actually came from us:** because
+every image is signed keylessly with cosign (via GitHub Actions' OIDC
+identity, not a private key we hold), a customer with no access to our
+CI system can still independently verify authenticity and provenance
+before deploying:
+```bash
+cosign verify \
+  --certificate-identity-regexp "https://github.com/<org>/<repo>/.github/workflows/ci.yaml@.*" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/<org>/<repo>/txn-platform@sha256:<digest>
+```
+This confirms the image was built and signed by our specific GitHub
+Actions workflow (not re-signed or substituted by a third party), without
+the customer ever needing network access to us at verification time — the
+signature and certificate travel with the image/registry entry itself.
+The attached SBOM (`cosign verify-attestation`) additionally lets the
+customer inspect exactly what's inside before running it.
+
+**Version tracking, controlled upgrades, rollback, diagnostics:**
+- Deployments reference the image by **digest**, never a mutable tag —
+  so "which version is running" is always an unambiguous, verifiable
+  digest, not a tag that could point to different content over time.
+- Upgrades are controlled the same way as in this demo: update
+  `docker-stack.yml`'s digest reference, `docker stack deploy`, and
+  Swarm's `update_config` (health-checked, rollback-on-failure) applies
+  identically in a customer environment.
+- Rollback is the same mechanism demonstrated here —
+  `docker service rollback`, or the automatic `failure_action: rollback`
+  — no dependency on reaching back out to our CI/registry.
+- Diagnostics: the same structured logs, Prometheus metrics, and
+  Grafana dashboards run entirely inside the customer's own Swarm
+  cluster; no telemetry needs to leave their environment for local
+  troubleshooting.
+
+In a real multi-node production deployment, each node would need
+registry credentials / an imagePullSecret to pull from GHCR (or the
+customer's own mirrored registry), and the placement constraint used in
+this demo would be removed.
+
+**Optional bundle (not built in this time box, but the design):** a
+release bundle for fully offline delivery would contain: the image as a
+`docker save` tarball, `docker-stack.yml`, the CycloneDX SBOM, the
+cosign signature + certificate (`.sig`/`.pem`) exported via
+`cosign save`, a version/changelog file, and `install.sh`/`rollback.sh`
+helpers that `docker load` the tarball and re-run `cosign verify` against
+the bundled signature before deploying — so the same verification
+guarantee holds even with zero network access at install time.
 
 ## 7. Known Gaps and First Improvements Before Production
 

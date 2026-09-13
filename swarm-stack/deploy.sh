@@ -2,7 +2,7 @@
 # Idempotent-ish deploy script: builds the image, ensures the swarm exists,
 # creates required secrets if missing, then deploys/updates the stack.
 set -e
-
+export TIMESTAMP=$(date +%s)
 STACK_NAME="axiler"
 IMAGE_TAG="txn-platform:dev"
 
