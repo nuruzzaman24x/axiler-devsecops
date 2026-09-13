@@ -176,6 +176,17 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
     secrets:
       - grafana_admin_password
+    configs:
+      - source: grafana_datasource_config
+        target: /etc/grafana/provisioning/datasources/prometheus.yml
+      - source: grafana_dashboard_provider_config
+        target: /etc/grafana/provisioning/dashboards/dashboard-provider.yml
+      - source: grafana_dashboard_request_rate
+        target: /var/lib/grafana/dashboards/request-rate-per-tenant.json
+      - source: grafana_dashboard_error_rate
+        target: /var/lib/grafana/dashboards/per-tenant-error-rate.json
+      - source: grafana_dashboard_latency
+        target: /var/lib/grafana/dashboards/p95-latency-per-tenant.json
     volumes:
       - grafana-data:/var/lib/grafana
     networks:
@@ -225,18 +236,24 @@ configs:
   alert_rules_config:
     file: ./alert_rules.yml
     # See alert_rules.yml in this same directory.
+  grafana_datasource_config:
+    file: ./grafana/datasources.yml
+  grafana_dashboard_provider_config:
+    file: ./grafana/dashboard-provider.yml
+  grafana_dashboard_request_rate:
+    file: ./grafana/dashboards/request-rate-per-tenant.json
+  grafana_dashboard_error_rate:
+    file: ./grafana/dashboards/per-tenant-error-rate.json
+  grafana_dashboard_latency:
+    file: ./grafana/dashboards/p95-latency-per-tenant.json
     #
     # IMPORTANT: Docker configs are immutable, same as secrets. If you
-    # edit prometheus.yml OR alert_rules.yml after the first deploy, the
-    # config object itself will NOT auto-update - Docker Swarm compares
-    # file content and will error on `docker stack deploy` if you just
-    # edit and redeploy with the same config name referencing changed
-    # content in some Docker versions, or silently keep the old version
-    # in others. Safest path if you edit either file:
-    #   docker service update --config-rm alert_rules_config axiler_prometheus
-    #   docker config rm alert_rules_config
-    #   docker stack deploy -c docker-stack.yml axiler
-    # (repeat similarly for prometheus_config if that file changed)
+    # edit any of prometheus.yml, alert_rules.yml, or the grafana/*
+    # files after the first deploy, the safest path is:
+    #   docker stack rm axiler && sleep 10
+    #   ./deploy.sh
+    # (docker stack rm auto-removes non-external configs defined here,
+    # so no manual `docker config rm` is needed - see README.)
 
 secrets:
   jwt_secret:
