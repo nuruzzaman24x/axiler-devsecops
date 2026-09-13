@@ -32,8 +32,8 @@ fi
 
 echo "== Ensuring grafana_admin_password exists =="
 if ! docker secret ls --format '{{.Name}}' | grep -qx grafana_admin_password; then
-    printf "changeme123" | docker secret create grafana_admin_password -
-    echo "Created secret 'grafana_admin_password' (login: admin / changeme123 - LOCAL DEMO ONLY)."
+    printf "Admin@123" | docker secret create grafana_admin_password -
+    echo "Created secret 'grafana_admin_password' (login: admin / Admin@123 - LOCAL DEMO ONLY)."
 else
     echo "Secret 'grafana_admin_password' already exists."
 fi
@@ -46,4 +46,4 @@ echo "Deployed. Check status with:  docker stack services $STACK_NAME"
 echo "App reachable via edge at:     http://localhost:80"
 echo "Traefik dashboard (demo only): http://localhost:8081"
 echo "Prometheus:                    http://localhost:9090"
-echo "Grafana (admin/changeme123):   http://localhost:3000"
+echo "Grafana (admin/Admin@123):   http://localhost:3000"
