@@ -1,3 +1,24 @@
+## Demonstration: Scenario 3 — Suspicious/Unauthorized Traffic
+
+Run the smoke test:
+    bash tests/smoke_test.sh
+
+Expected output (relevant part):
+    == Request with NO token (expect 401) ==
+    401
+
+    == Request with GARBAGE token (expect 403) ==
+    403
+
+This shows the edge/app rejecting unauthenticated and invalid-signature
+requests. Corresponding log lines (auth_failed) can be seen with:
+    docker service logs axiler_app --tail 50
+
+<img width="1331" height="710" alt="image" src="https://github.com/user-attachments/assets/34a9bebb-bf70-4c3d-b64d-4c86799a641e" />
+
+
+
+
 # Axiler DevSecOps Take-Home — Secure Multi-Tenant Transaction Platform
 
 A small, synthetic multi-tenant transaction platform demonstrating: tenant
