@@ -87,6 +87,12 @@ In GitHub Actions, the **Trivy Vulnerability Scan** job fails
 never runs (`needs: [vuln-scan, sbom]`). Result: a vulnerable image is
 never pushed or signed to GHCR.
 
+(Already verified once for real: the pipeline's Trivy scan caught two
+genuine HIGH-severity CVEs in the originally-pinned `PyJWT==2.9.0`
+dependency — CVE-2026-32597 and CVE-2026-48526 — and correctly failed the
+pipeline before any push/sign step ran. Fixed by bumping to
+`PyJWT==2.13.0`.)
+
 ### Scenario 2 — A bad deployment is detected and Swarm rolls it back
 
 ```bash
@@ -98,12 +104,13 @@ This triggers a bad update with `FAIL_HEALTH=true`. Because
 detects the failing healthcheck and automatically reverts to the previous
 working version. Verify:
 ```bash
-docker service ps axiler_app --no-trunc   # shows a "Rollback" state
+docker service ps axiler_app --no-trunc   # shows a "Rollback"/"Failed" state on the bad task
 curl http://localhost:80/health           # back to 200 OK
 ```
-(Already verified once: task `s1ghyeivjuat7db9l2yp3grq5` was detected as
-unhealthy and killed, Swarm auto-rolled back, and `/health` + the smoke
-test confirmed recovery.)
+(Already verified: the bad task was detected as unhealthy after
+repeated `/health` 500s, was killed by Swarm, and the existing healthy
+replica kept serving `200 OK` throughout — zero downtime. Recovery was
+confirmed via `curl /health` and the smoke test.)
 
 ### Scenario 3 — Unauthorized/suspicious traffic is detected and blocked
 
@@ -119,20 +126,35 @@ curl -o /dev/null -w "%{http_code}\n" \
 The application log (`docker service logs axiler_app`) shows
 `auth_failed reason="missing_bearer_token"` or
 `auth_failed reason="invalid_signature"` entries for these attempts — the
-exact signal an on-call engineer or a SIEM would alert on.
+exact signal an on-call engineer or a SIEM would alert on. A sustained
+burst of these (see `SuspiciousUnauthenticatedTraffic` below) also fires
+a Prometheus alert.
 
 ## Where to Look for Observability
 
 - **Grafana dashboards**: `http://localhost:3000` (once the stack is
-  deployed) — three separate dashboards:
+  deployed) — three dashboards, source-controlled under
+  `swarm-stack/grafana/dashboards/`:
   - `p95 Latency per Tenant`
   - `Per-tenant Error Rate`
   - `Request Rate per Tenant`
-- **Alert rule**: Grafana → Alerting → Alert rules → `HighErrorRatePerTenant`
-  (fires when per-tenant error rate exceeds 10% for 1 minute)
+- **Alert rules**: defined declaratively in
+  `swarm-stack/alert_rules.yml` (loaded by Prometheus, **not** created
+  by hand in the Grafana UI). View firing/pending state at
+  `http://localhost:9090/alerts`:
+  - `HighErrorRate` — fires when overall 5xx/total ratio exceeds 5% for
+    1 minute (Scenario 2 signal).
+  - `SuspiciousUnauthenticatedTraffic` — fires when unauthenticated
+    request rate exceeds 3 req/s for 30s (Scenario 3 signal). **Verified
+    firing** with a sustained burst of token-less requests.
+  - `EdgeRateLimitingActive` — fires when Traefik's rate-limit
+    middleware has been returning HTTP 429 for at least 30s, confirming
+    the edge control in Step 4 is actually doing something. **Verified
+    firing** with `demo_ratelimit.sh`.
 - **Prometheus**: internal-only (`app-net`), not reachable from outside
-  the swarm; queried by Grafana internally.
-- **Raw metrics endpoint**: `app:8080/metrics` (internal network only)
+  the swarm; queried by Grafana internally. Rules can be inspected at
+  `http://localhost:9090/rules`.
+- **Raw metrics endpoint**: `app:8080/metrics` (internal network only).
 
 ## Rollback (manual, if needed)
 

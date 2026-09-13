@@ -44,7 +44,11 @@ cosign sign (keyless, OIDC) → cosign attest (SBOM attached)`.
   ever stored in the repo or in secrets, so there's no key to leak.
 - The vulnerability gate is a hard block: a HIGH/CRITICAL finding fails
   the pipeline and the push/sign job never runs
-  (`needs: [vuln-scan, sbom]`).
+  (`needs: [vuln-scan, sbom]`). This was proven for real, not just in
+  theory: the originally-pinned `PyJWT==2.9.0` had two genuine HIGH CVEs
+  (CVE-2026-32597, CVE-2026-48526), Trivy caught both, and the pipeline
+  correctly failed before any push/sign step ran. Fixed by bumping to
+  `PyJWT==2.13.0`.
 - Trivy is run directly as a Docker container (`aquasec/trivy`) rather
   than through the official GitHub Action, because that Action's
   binary-download installer had a known flaky upstream issue; Docker Hub
@@ -75,7 +79,7 @@ cosign sign (keyless, OIDC) → cosign attest (SBOM attached)`.
   anywhere.
 - **Least privilege**: the workflow's `permissions:` block grants only
   the scopes actually needed (`contents: read`, `packages: write`,
-  `id-token: write`).
+  `id-token: write`, `security-events: write` for SARIF upload).
 
 ## 4. Observability
 
@@ -89,11 +93,37 @@ cosign sign (keyless, OIDC) → cosign attest (SBOM attached)`.
   — itself a signal for Scenario 3.
 - **Dashboards**: three separate Grafana dashboards — p95 Latency per
   Tenant, Per-tenant Error Rate, Request Rate per Tenant — so an operator
-  can see at a glance which tenant is affected.
-- **Alert**: `HighErrorRatePerTenant` fires when a tenant's 5xx/total
-  ratio (using an `or ... * 0` fallback so tenants with zero errors still
-  report a value instead of "no data") exceeds 10% for 1 minute (pending
-  period).
+  can see at a glance which tenant is affected. These are
+  source-controlled (`swarm-stack/grafana/dashboards/*.json`, provisioned
+  by UID) rather than created by hand in the UI, so a fresh deploy
+  reproduces the same dashboards.
+- **Alerting**: three rules, declaratively defined in
+  `swarm-stack/alert_rules.yml` and loaded directly by Prometheus (not
+  created through the Grafana Alerting UI — this keeps the alert
+  definitions source-controlled alongside the rest of the stack):
+  - `HighErrorRate` — fires when the overall 5xx/total request ratio
+    (using an `or ... * 0` fallback so periods with zero errors still
+    report a value instead of "no data") exceeds 5% for 1 minute. This
+    is the Scenario 2 signal.
+  - `SuspiciousUnauthenticatedTraffic` — fires when the rate of requests
+    with `tenant_id="unauthenticated"` (missing/invalid token) exceeds
+    3 req/s for 30s. This is the Scenario 3 signal.
+  - `EdgeRateLimitingActive` — fires when Traefik has been returning
+    HTTP 429 for at least 30s, confirming the edge rate-limit control
+    from Step 4 is actually rejecting traffic, not just configured on
+    paper.
+  - **All three were verified firing**, not just deployed:
+    `EdgeRateLimitingActive` and `SuspiciousUnauthenticatedTraffic` were
+    both observed live (`(1 active)`) in the Prometheus Alerts UI
+    (`http://localhost:9090/alerts`) during load testing.
+  - **A real tuning issue was caught and fixed here**: the edge
+    rate-limit (`average=5 req/s`) and the
+    `SuspiciousUnauthenticatedTraffic` threshold (originally also `>5`)
+    were set to the same number, so the edge itself was capping
+    sustained traffic below the alert's own threshold and the alert
+    never fired. Lowered the alert threshold to `>3` so it can fire even
+    with the edge control active — a good example of two independently
+    "correct" pieces of config interacting badly with each other.
 
 ## 5. Rollback Strategy
 
@@ -102,7 +132,9 @@ monitor: 15s, max_failure_ratio: 0` — after a new deployment, Swarm
 monitors healthchecks for 15 seconds; if even one task fails, it
 **automatically** rolls back, with no human intervention. Verified via
 `demo_bad_deploy.sh` — deploying a `FAIL_HEALTH=true` version, Swarm
-detected it and auto-rolled back, confirmed by `/health` + the smoke
+detected the repeated `/health` 500 responses, killed the bad task, and
+the pre-existing healthy replica kept serving `200 OK` throughout with
+zero observed downtime. Recovery was confirmed via `/health` + the smoke
 test. Manual override: `docker service rollback axiler_app`.
 
 ## 6. Restricted-Connectivity Delivery Design
@@ -138,7 +170,10 @@ removed.
 5. **Swarm secrets are immutable** — rotating a secret requires creating
    one under a new name and updating the service. Production should
    handle this more gracefully with HashiCorp Vault or a cloud secret
-   manager.
+   manager. The same immutability limitation applies to Swarm Configs
+   (used for `alert_rules.yml`, Prometheus/Grafana provisioning) — each
+   content change requires a new config name, which is why `deploy.sh`
+   generates a fresh `${TIMESTAMP}` suffix on every deploy.
 6. **Traefik dashboard (port 8081) is exposed in insecure mode** — only
    for local demo debugging; in production this should be disabled or
    placed on a separate secured network.
