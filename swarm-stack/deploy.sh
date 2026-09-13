@@ -14,7 +14,7 @@ if ! docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active; then
     else
         echo "WARNING: ADVERTISE_ADDR not set. Docker will auto-pick an interface,"
         echo "which is unreliable on multi-homed hosts. Recommended:"
-        echo "    ADVERTISE_ADDR=<your-node-ip> ./deploy.sh"
+        echo "    ADVERTISE_ADDR=172.17.0.232 ./deploy.sh"
         docker swarm init
     fi
 fi
